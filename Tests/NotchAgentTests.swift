@@ -783,6 +783,32 @@ enum NotchAgentTests {
         }
         suite.expect(linesRead.isEmpty, "incremental read ignores subsequent updates to user message metadata")
 
+        // OpenCode 2 stores sessions and messages in versioned tables and
+        // keeps the message type outside its JSON data.
+        let v2Path = tmpDir.appending(path: "opencode-v2.db").path
+        var v2: OpaquePointer?
+        guard sqlite3_open(v2Path, &v2) == SQLITE_OK, let v2 else {
+            suite.expect(false, "temporary OpenCode 2 database opens")
+            return
+        }
+        sqlite3_exec(v2, """
+        CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+        INSERT INTO session_v2 VALUES ('s_v2', '/Users/me/code/v2', NULL, 1790088000000, 1790088020000);
+        INSERT INTO session_message VALUES ('m_v2', 's_v2', 'assistant', 1790088005000, 1790088005000,
+          '{"model":{"id":"provider/model","providerID":"provider"},"cost":0.01,"tokens":{"input":8,"output":3,"reasoning":2,"cache":{"read":4,"write":1}},"time":{"created":1790088005000,"completed":1790088006000}}');
+        """, nil, nil, nil)
+        sqlite3_close(v2)
+        let v2Cursor = AgentLogCursor(path: v2Path, provider: .opencode)
+        var v2Lines: [String] = []
+        AgentOpenCodeReader.readAppended(v2Cursor) { v2Lines.append(String(decoding: $0, as: UTF8.self)) }
+        let v2Payload = v2Lines.first.flatMap { $0.data(using: .utf8) } ?? Data()
+        var v2State = AgentLogState()
+        let v2Entries = AgentLogParser.parseOpenCode(v2Payload, state: &v2State, now: now)
+        suite.expect(v2Lines.count == 1 && v2Payload.contains(Data(#""role":"assistant""#.utf8))
+                        && v2Entries.contains { if case .usage = $0 { return true }; return false },
+                     "OpenCode 2 tables provide assistant usage to the existing parser")
+
         // Cancellation check
         linesRead.removeAll()
         AgentOpenCodeReader.readAppended(cursor, shouldContinue: { false }) { data in
